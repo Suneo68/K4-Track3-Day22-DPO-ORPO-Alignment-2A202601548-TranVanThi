@@ -11,8 +11,8 @@ Build SFT-mini checkpoint → train DPO adapter → compare SFT-only vs SFT+DPO 
 
 | Tier | Compute | Base model | SFT slice | DPO slice | Time | Khi nào dùng |
 |---|---|---|---|---|---|---|
-| **T4 (default)** | Free Colab T4 16 GB / laptop GPU ≥ 12 GB | `Qwen2.5-3B-bnb-4bit` | 1k VN Alpaca | 2k UltraFeedback | ~30 min core (NB1-4) | Hầu hết học viên — không Anthropic/OpenAI key, free Colab, RTX 3060/3070/4060 laptop |
-| **BigGPU (full)** | Colab Pro A100/L4 / Kaggle T4×2 / cloud H100 | `Qwen2.5-7B-bnb-4bit` | 1k VN Alpaca | 5k UltraFeedback | ~25 min core (NB1-4) | Đã có cloud GPU, muốn faithful với deck demo (3.2 → 4.1 helpfulness, A100 timing) |
+| **T4 (default)** | Free Colab T4 16 GB / laptop GPU ≥ 12 GB | `Qwen2.5-3B-bnb-4bit` | 1k vi-alpaca | 2k pref (1.8k UltraFeedback + 200 native-VN) | ~40 min core (NB1-4) | Hầu hết học viên — không Anthropic/OpenAI key, free Colab, RTX 3060/3070/4060 laptop |
+| **BigGPU (full)** | Colab Pro A100/L4 / Kaggle T4×2 / cloud H100 | `Qwen2.5-7B-bnb-4bit` | 1k vi-alpaca | 5k pref (4.5k UltraFeedback + 500 native-VN) | ~30 min core (NB1-4) | Đã có cloud GPU, muốn faithful với deck demo (3.2 → 4.1 helpfulness, A100 timing) |
 
 > Cả hai tier dùng **cùng notebook source** — đổi giữa T4 và BigGPU bằng cách sửa `COMPUTE_TIER` trong `.env` (hoặc đổi badge launch URL bên dưới).
 
@@ -48,7 +48,7 @@ make help            Show this help
 make setup           Auto-detect Colab vs laptop, install deps + smoke check
 make smoke           Import + GPU check (scripts/verify.py --smoke)
 make sft             NB1 — build SFT-mini checkpoint (~10 min T4 / ~5 min A100)
-make data            NB2 — preference data prep (~2 min)
+make data            NB2 — preference data prep (~2 min English-only; ~12-17 min with native-VN pairs, default on)
 make dpo             NB3 — DPO training (~15 min T4 / ~12 min A100)
 make eval            NB4 — side-by-side comparison + optional API judge
 make pipeline        CORE: run NB1 → NB4 in order (~30 min T4)
@@ -79,8 +79,8 @@ Hoặc Colab Pro / Kaggle: open `colab/Lab22_DPO_BigGPU.ipynb` (badge link sẽ 
 
 | Notebook | Skill | Slide deliverable | Pass when… |
 |---|---|---|---|
-| `01_sft_mini` | Re-build Lab 21 SFT checkpoint inline (Unsloth + LoRA r=16, 1k VN Alpaca, 1 epoch) | Bullet 1 — base SFT artifact | adapter saves; loss decreases monotonically |
-| `02_preference_data` | Load `argilla/ultrafeedback-binarized-preferences-cleaned`, format `prompt/chosen/rejected`, save Parquet | Bullet 2 — preference data ready | parquet written; chosen ≠ rejected; 3 examples printed |
+| `01_sft_mini` | Re-build Lab 21 SFT checkpoint inline (Unsloth + LoRA r=16, 1k `vi-alpaca`, 1 epoch) | Bullet 1 — base SFT artifact | adapter saves; loss decreases monotonically |
+| `02_preference_data` | Load `argilla/ultrafeedback-binarized-preferences-cleaned` (EN) + rejection-sample native-VN pairs from `vi-alpaca` against SFT-mini, format `prompt/chosen/rejected`, save Parquet | Bullet 2 — preference data ready | parquet written; chosen ≠ rejected; 3 examples printed (incl. ≥1 native-VN) |
 | `03_dpo_train` | TRL `DPOTrainer(beta=0.1, lr=5e-7)` on SFT model + frozen reference; plot reward curves | Bullet 3 — DPO training + reward curves | adapter saves; reward gap > 0; chosen reward ↑ (or ↓ explained per deck §3.4) |
 | `04_compare_and_eval` | 8 fixed prompts × {SFT, SFT+DPO} side-by-side; optional GPT-4o/Claude judge | Bullet 4 — helpfulness comparison | table renders; ≥ 8 examples; win/loss/tie counts reported |
 | `05_merge_deploy_gguf` **(OPTIONAL)** | `merge_and_unload()` → GGUF Q4_K_M → llama-cpp-python smoke test | Bullet 5 — deployable artifact | GGUF < 5 GB; smoke prompt returns coherent VN |
@@ -103,7 +103,7 @@ Tra ngược từ slide bạn nhớ trong lecture về cell trong notebook:
 | §3.2 (β tuning) | Trade-off conservative vs aggressive | `03_dpo_train.py` cell §5 (bonus β-sweep) |
 | §3.4 (Failure modes) | Likelihood displacement, length hacking | `03_dpo_train.py` warning cell |
 | §5.2 (TRL implementation) | `DPOConfig` hyperparameters | `03_dpo_train.py` cell §2 |
-| §5.4 (VN landscape) | VinaLLaMA / PhoGPT / Vistral / SeaLLM | `02_preference_data.py` callout + `BONUS-CHALLENGE.md` provocation 1 |
+| §5.4 (VN landscape) | VinaLLaMA / PhoGPT / Vistral / SeaLLM | `02_preference_data.py` §2b (native-VN rejection sampling) + `BONUS-CHALLENGE.md` provocation 1 |
 | §8.1–§8.5 (Đánh giá Alignment) | Static / Judge / Reward-Model / VN landscape | `06_benchmark.py` |
 | §9.1 (Demo) | UltraFeedback 2k, 30 min A100, 3.2 → 4.1 | `04_compare_and_eval.py` |
 | §9.2b (Tulu 3 stats) | +1.7 MATH / +3.3 GSM8K / +1.3 IFEval | reference numbers + `06_benchmark.py` measures *your* equivalents |
@@ -193,7 +193,7 @@ Full provocations: [`BONUS-CHALLENGE.md`](BONUS-CHALLENGE.md) (tiếng Việt) �
 ├── .env.example                    # env template (COMPUTE_TIER, API keys)
 ├── notebooks/                      # 6 Jupytext .py files (source of truth)
 │   ├── 01_sft_mini.py              # build SFT checkpoint inline
-│   ├── 02_preference_data.py       # load + format UltraFeedback
+│   ├── 02_preference_data.py       # load + format UltraFeedback + native-VN pairs
 │   ├── 03_dpo_train.py             # TRL DPOTrainer + reward curves
 │   ├── 04_compare_and_eval.py      # SFT-only vs SFT+DPO + judge
 │   ├── 05_merge_deploy_gguf.py     # merge + GGUF + llama.cpp smoke
@@ -234,6 +234,7 @@ Full provocations: [`BONUS-CHALLENGE.md`](BONUS-CHALLENGE.md) (tiếng Việt) �
 | NB6 IFEval crashes with "DataLoader" worker | lm-eval 0.4.x compat — set env `HF_DATASETS_TRUST_REMOTE_CODE=1` and rerun |
 | NB6 GSM8K accuracy = 0.000 | Few-shot prompts not loading. Verify `--num_fewshot 8` reaches the harness; downgrade lm-eval if 0.4.6 ships changes |
 | NB6 takes > 90 min on T4 | Lower `LIMIT_MMLU` (default 500) and `LIMIT_GSM8K` (default 500) further. Bench tier checks env first. |
+| NB2 taking longer than expected / needs GPU now | By default NB2 also generates `VN_POOL_SIZE` native-VN rejected samples from SFT-mini (§2b), so it needs CUDA and takes ~10-15 min extra on T4. Set `VN_PREF_FRACTION=0` to skip and fall back to the ~2 min English-only path |
 
 ---
 
@@ -272,7 +273,7 @@ Full provocations: [`BONUS-CHALLENGE.md`](BONUS-CHALLENGE.md) (tiếng Việt) �
 - **Slide deck:** [`day22/day07-dpo-orpo-alignment-tu-sft-en-preference-learning.tex`](../day07-dpo-orpo-alignment-tu-sft-en-preference-learning.tex)
 - **Sibling Day 21 lab** (LoRA/QLoRA fine-tuning, the SFT predecessor): [VinUni-AI20k/Day21-Track3-Finetuning-LLMs-LoRA-QLoRA](https://github.com/VinUni-AI20k/Day21-Track3-Finetuning-LLMs-LoRA-QLoRA)
 - **Stack:** Unsloth (Daniel Han + Mike Han), TRL (Hugging Face), PEFT, bitsandbytes, llama.cpp
-- **Datasets:** UltraFeedback (Argilla), `5CD-AI/Vietnamese-alpaca-cleaned`
+- **Datasets:** UltraFeedback (Argilla), `bkai-foundation-models/vi-alpaca` (BKAI Foundation Models — org-approved for this lab)
 
 ---
 

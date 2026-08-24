@@ -41,9 +41,14 @@ else:  # BIGGPU
     PER_DEVICE_BATCH = 2
     GRAD_ACCUM = 4
 
-SFT_DATASET = os.environ.get("SFT_DATASET", "5CD-AI/Vietnamese-alpaca-cleaned")
-SFT_SLICE = 1000
+SFT_DATASET = os.environ.get("SFT_DATASET", "bkai-foundation-models/vi-alpaca")
+SFT_SLICE = int(os.environ.get("SFT_SLICE", "1000"))
 NUM_EPOCHS = 1
+
+# NB2 builds native-VN preference pairs from rows [SFT_SLICE:] of the SAME dataset.
+# Keeping the two slices disjoint matters: if DPO's `chosen` answers had already been
+# memorised during SFT, the implicit reward on them is inflated and the reward gap
+# measures memorisation, not preference. Raise NB2's VN_POOL_START if you raise this.
 
 REPO_ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
 ADAPTER_OUT = REPO_ROOT / "adapters" / "sft-mini"
@@ -106,14 +111,33 @@ print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requir
 # %% [markdown]
 # ## 2. Load + format VN Alpaca slice
 #
-# `5CD-AI/Vietnamese-alpaca-cleaned` is a 50k-row VN Alpaca translation. Lab 21
-# uses 1k slice for the demo run; we match that exactly so reward gap is comparable.
+# `bkai-foundation-models/vi-alpaca` — 50,006 rows, cột `instruction / input / output`,
+# tiếng Việt native (BKAI Foundation Models). Ban tổ chức đã cho phép dùng dataset này.
+#
+# Khác `5CD-AI/Vietnamese-alpaca-cleaned` (bản dịch máy của Alpaca tiếng Anh):
+# vi-alpaca sinh trực tiếp bằng tiếng Việt nên idiom + cấu trúc câu tự nhiên hơn,
+# ít lỗi "dịch word-by-word". Schema giống hệt Alpaca nên `format_alpaca_to_chat`
+# bên dưới không phải đổi gì.
+#
+# Điểm quan trọng cho lab này: **NB2 tái sử dụng chính dataset này làm nguồn `chosen`**
+# cho preference pairs tiếng Việt. Một dataset, hai vai trò — SFT ở NB1 (rows `[:1000]`),
+# preference ở NB2 (rows `[1000:]`, disjoint).
 
 # %%
 from datasets import load_dataset
 
 ds = load_dataset(SFT_DATASET, split=f"train[:{SFT_SLICE}]")
 print(f"Loaded {len(ds)} rows. Columns: {ds.column_names}")
+
+# vi-alpaca có một số ít row với instruction hoặc output rỗng. Nếu để nguyên, chúng
+# tạo ra chat turn thiếu user message (hoặc thiếu assistant message) và loss trên
+# các token đó vô nghĩa.
+_before = len(ds)
+ds = ds.filter(
+    lambda r: bool((r.get("instruction") or "").strip())
+    and bool((r.get("output") or "").strip())
+)
+print(f"Filtered empty instruction/output: {_before} -> {len(ds)} rows")
 print(f"\nFirst row:\n{ds[0]}")
 
 # %%

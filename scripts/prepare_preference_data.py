@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""CLI wrapper for NB2 logic — prepares preference Parquet.
+"""CLI wrapper for NB2 logic — prepares preference Parquet (English-only slice).
 
 Usage:
     python scripts/prepare_preference_data.py
     python scripts/prepare_preference_data.py --slice 5000 --output data/pref-5k
 
-Mirrors `notebooks/02_preference_data.py` cells 1-3. Use this if you want to
-re-build the data without launching Jupyter (e.g., from a Makefile target).
+Mirrors `notebooks/02_preference_data.py` §2-3 (the UltraFeedback English part
+only). It does NOT build the native-VN pairs from §2b of the notebook — that
+step loads the SFT-mini model to generate `rejected` samples and doesn't fit
+a lightweight CLI wrapper. Use the notebook directly if you want the hybrid
+EN + native-VN mix; this script is for a quick English-only rebuild.
 """
 from __future__ import annotations
 
