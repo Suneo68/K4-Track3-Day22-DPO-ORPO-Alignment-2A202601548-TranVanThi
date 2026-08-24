@@ -26,31 +26,6 @@ import os
 import json
 from pathlib import Path
 
-# --- T4 / Turing (sm_75) attention fix -------------------------------------
-# xformers khong co kernel memory_efficient_attention_backward cho GQA (dinh dang
-# BMGHK) tren sm_75: fa2B/fa3B doi >= sm_80, cutlassB khong ho tro BMGHK
-# -> NotImplementedError ngay backward dau tien cua DPO.
-# Unsloth chon backend qua co HAS_XFORMERS dat luc import, KHONG co env var nao
-# de ep -> chan xformers o tang import truoc khi unsloth duoc nap.
-import sys
-
-GPU_CAP = None
-try:
-    import torch as _torch
-    if _torch.cuda.is_available():
-        GPU_CAP = _torch.cuda.get_device_capability(0)
-except Exception:
-    pass
-
-NEEDS_SDPA = GPU_CAP is not None and GPU_CAP < (8, 0)
-if NEEDS_SDPA:
-    if "unsloth" not in sys.modules:
-        # gan None -> `import xformers` raise ImportError -> HAS_XFORMERS = False
-        sys.modules.setdefault("xformers", None)
-        sys.modules.setdefault("xformers.ops", None)
-    print(f"GPU sm_{GPU_CAP[0]}{GPU_CAP[1]} < sm_80 -> chan xformers, ep dung SDPA")
-# ---------------------------------------------------------------------------
-
 COMPUTE_TIER = os.environ.get("COMPUTE_TIER", "T4").upper()
 BASE_MODEL = (
     "unsloth/Qwen2.5-3B-bnb-4bit" if COMPUTE_TIER == "T4"
@@ -82,18 +57,6 @@ assert torch.cuda.is_available()
 
 # %%
 from unsloth import FastLanguageModel
-
-# Ha co xformers phong khi unsloth da duoc import truoc do (vd. cell setup cua
-# Kaggle/Colab da cham vao unsloth) -> luc do chan sys.modules khong con tac dung.
-if NEEDS_SDPA:
-    try:
-        from unsloth.utils import attention_dispatch as _ad
-        for _flag in ("HAS_XFORMERS", "HAS_FLASH_ATTENTION"):
-            if getattr(_ad, _flag, False):
-                setattr(_ad, _flag, False)
-                print(f"Set attention_dispatch.{_flag} = False")
-    except Exception as _exc:
-        print("Khong patch duoc attention_dispatch:", _exc)
 from peft import PeftModel
 
 model, tokenizer = FastLanguageModel.from_pretrained(
@@ -104,29 +67,6 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 )
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
-
-# Qwen2.5 *base* (khong phai -Instruct) khong kem chat_template -> apply_chat_template()
-# raise ValueError. Set ChatML (dinh dang native cua Qwen2.5) mot cach tuong minh.
-if getattr(tokenizer, "chat_template", None) is None:
-    tokenizer.chat_template = (
-        r"{% for message in messages %}"
-        r"{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
-        r"{% endfor %}"
-        r"{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
-    )
-    print("Set tokenizer.chat_template = ChatML (base model khong co san)")
-
-# ChatML ket thuc luot bang <|im_end|>. Neu khong tro eos vao do, generate() se
-# chay het max_new_tokens thay vi dung dung cho.
-_im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
-if _im_end is not None and _im_end != tokenizer.unk_token_id:
-    tokenizer.eos_token = "<|im_end|>"
-    tokenizer.pad_token = tokenizer.eos_token
-    try:
-        model.generation_config.eos_token_id = _im_end
-        model.generation_config.pad_token_id = _im_end
-    except AttributeError:
-        pass
 
 # Stack SFT-mini → DPO adapters
 SFT_PATH = REPO_ROOT / "adapters" / "sft-mini"

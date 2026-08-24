@@ -26,31 +26,6 @@ import os
 from pathlib import Path
 
 # Tier detection. Defaults to T4 if env not set.
-# --- T4 / Turing (sm_75) attention fix -------------------------------------
-# xformers khong co kernel memory_efficient_attention_backward cho GQA (dinh dang
-# BMGHK) tren sm_75: fa2B/fa3B doi >= sm_80, cutlassB khong ho tro BMGHK
-# -> NotImplementedError ngay backward dau tien cua DPO.
-# Unsloth chon backend qua co HAS_XFORMERS dat luc import, KHONG co env var nao
-# de ep -> chan xformers o tang import truoc khi unsloth duoc nap.
-import sys
-
-GPU_CAP = None
-try:
-    import torch as _torch
-    if _torch.cuda.is_available():
-        GPU_CAP = _torch.cuda.get_device_capability(0)
-except Exception:
-    pass
-
-NEEDS_SDPA = GPU_CAP is not None and GPU_CAP < (8, 0)
-if NEEDS_SDPA:
-    if "unsloth" not in sys.modules:
-        # gan None -> `import xformers` raise ImportError -> HAS_XFORMERS = False
-        sys.modules.setdefault("xformers", None)
-        sys.modules.setdefault("xformers.ops", None)
-    print(f"GPU sm_{GPU_CAP[0]}{GPU_CAP[1]} < sm_80 -> chan xformers, ep dung SDPA")
-# ---------------------------------------------------------------------------
-
 COMPUTE_TIER = os.environ.get("COMPUTE_TIER", "T4").upper()
 assert COMPUTE_TIER in ("T4", "BIGGPU"), f"Invalid COMPUTE_TIER: {COMPUTE_TIER}"
 
@@ -66,7 +41,7 @@ else:  # BIGGPU
     PER_DEVICE_BATCH = 2
     GRAD_ACCUM = 4
 
-SFT_DATASET = os.environ.get("SFT_DATASET", "5CD-AI/Vietnamese-alpaca-gpt4-gg-translated")
+SFT_DATASET = os.environ.get("SFT_DATASET", "5CD-AI/Vietnamese-alpaca-cleaned")
 SFT_SLICE = 1000
 NUM_EPOCHS = 1
 
@@ -98,18 +73,6 @@ print(f"GPU: {gpu.name}  ({gpu.total_memory / 1e9:.1f} GB)")
 # %%
 from unsloth import FastLanguageModel
 
-# Ha co xformers phong khi unsloth da duoc import truoc do (vd. cell setup cua
-# Kaggle/Colab da cham vao unsloth) -> luc do chan sys.modules khong con tac dung.
-if NEEDS_SDPA:
-    try:
-        from unsloth.utils import attention_dispatch as _ad
-        for _flag in ("HAS_XFORMERS", "HAS_FLASH_ATTENTION"):
-            if getattr(_ad, _flag, False):
-                setattr(_ad, _flag, False)
-                print(f"Set attention_dispatch.{_flag} = False")
-    except Exception as _exc:
-        print("Khong patch duoc attention_dispatch:", _exc)
-
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=BASE_MODEL,
     max_seq_length=MAX_LEN,
@@ -121,29 +84,6 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
     print("Set tokenizer.pad_token = eos_token")
-
-# Qwen2.5 *base* (khong phai -Instruct) khong kem chat_template -> apply_chat_template()
-# raise ValueError. Set ChatML (dinh dang native cua Qwen2.5) mot cach tuong minh.
-if getattr(tokenizer, "chat_template", None) is None:
-    tokenizer.chat_template = (
-        r"{% for message in messages %}"
-        r"{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
-        r"{% endfor %}"
-        r"{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
-    )
-    print("Set tokenizer.chat_template = ChatML (base model khong co san)")
-
-# ChatML ket thuc luot bang <|im_end|>. Neu khong tro eos vao do, generate() se
-# chay het max_new_tokens thay vi dung dung cho.
-_im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
-if _im_end is not None and _im_end != tokenizer.unk_token_id:
-    tokenizer.eos_token = "<|im_end|>"
-    tokenizer.pad_token = tokenizer.eos_token
-    try:
-        model.generation_config.eos_token_id = _im_end
-        model.generation_config.pad_token_id = _im_end
-    except AttributeError:
-        pass
 
 # %%
 model = FastLanguageModel.get_peft_model(
@@ -166,7 +106,7 @@ print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requir
 # %% [markdown]
 # ## 2. Load + format VN Alpaca slice
 #
-# `5CD-AI/Vietnamese-alpaca-gpt4-gg-translated` is a 52k-row VN Alpaca-GPT4 set (Google-translated, cot `instruction_vi` / `input_vi` / `output_vi`). Lab 21
+# `5CD-AI/Vietnamese-alpaca-cleaned` is a 50k-row VN Alpaca translation. Lab 21
 # uses 1k slice for the demo run; we match that exactly so reward gap is comparable.
 
 # %%
@@ -178,46 +118,20 @@ print(f"\nFirst row:\n{ds[0]}")
 
 # %%
 # Alpaca → ChatML format (Qwen2.5's native template)
-# Column-name resolution. Cac mirror VN Alpaca dung schema khac nhau:
-#   5CD-AI/Vietnamese-alpaca-gpt4-gg-translated -> instruction_vi / input_vi / output_vi (+ *_en)
-#   5CD-AI/Vietnamese-alpaca-cleaned            -> instruction / input / output
-# Uu tien cot _vi de train tren tieng Viet; fallback ve schema Alpaca chuan.
-def _pick(row, *names):
-    for n in names:
-        value = row.get(n)
-        if value:
-            return value
-    return ""
-
-
 def format_alpaca_to_chat(row):
-    instruction = _pick(row, "instruction_vi", "instruction")
-    extra_input = _pick(row, "input_vi", "input")
-    output = _pick(row, "output_vi", "output")
-
     messages = []
-    if instruction:
-        prompt = instruction
-        if extra_input:
-            prompt += "\n\n" + extra_input
+    if row.get("instruction"):
+        prompt = row["instruction"]
+        if row.get("input"):
+            prompt += "\n\n" + row["input"]
         messages.append({"role": "user", "content": prompt})
-    if output:
-        messages.append({"role": "assistant", "content": output})
+    if row.get("output"):
+        messages.append({"role": "assistant", "content": row["output"]})
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
     return {"text": text}
 
 
 ds_formatted = ds.map(format_alpaca_to_chat, remove_columns=ds.column_names)
-
-# Guard: neu ten cot khong khop, apply_chat_template van tra ve chuoi template rong
-# -> train ra rac ma khong bao loi. Bat o day thay vi 10 phut sau.
-n_empty = sum(1 for t in ds_formatted["text"] if len(t.strip()) < 32)
-assert n_empty < 0.1 * len(ds_formatted), (
-    f"{n_empty}/{len(ds_formatted)} rows formatted rong. "
-    f"Column names cua dataset: {ds.column_names}. "
-    f"Sua _pick(...) trong format_alpaca_to_chat cho khop schema."
-)
-print(f"Empty/degenerate rows: {n_empty}/{len(ds_formatted)}")
 print(f"\nSample formatted text (first 500 chars):\n{ds_formatted[0]['text'][:500]}")
 
 # %% [markdown]

@@ -28,14 +28,7 @@ Build SFT-mini checkpoint → train DPO adapter → compare SFT-only vs SFT+DPO 
 
 Click → Runtime → Change runtime type → **T4 GPU** → Run all.
 
-**Option 2: Kaggle (T4×2 hoặc P100 — nhanh hơn, quota 30h/tuần)**
-
-Import [`kaggle/Lab22_DPO_Kaggle_T4.ipynb`](kaggle/Lab22_DPO_Kaggle_T4.ipynb) vào
-`kaggle.com/code` → Accelerator **GPU T4 x2**, Internet **On** → Run All.
-Notebook tự khoá về 1 GPU (Unsloth không hỗ trợ multi-GPU) và có cell đóng gói artifact
-thành zip để tải về. Chi tiết từng bước: [`kaggle/KAGGLE-GUIDE.md`](kaggle/KAGGLE-GUIDE.md).
-
-**Option 3: Local laptop (≥ 12 GB VRAM)**
+**Option 2: Local laptop (≥ 12 GB VRAM)**
 
 ```bash
 git clone https://github.com/<your-username>/K4-Track3-Day22-DPO-ORPO-Alignment.git
@@ -208,9 +201,6 @@ Full provocations: [`BONUS-CHALLENGE.md`](BONUS-CHALLENGE.md) (tiếng Việt) �
 ├── colab/                          # Colab-launchable .ipynb mirrors
 │   ├── Lab22_DPO_T4.ipynb
 │   └── Lab22_DPO_BigGPU.ipynb
-├── kaggle/                         # Kaggle-ready notebook + guide
-│   ├── Lab22_DPO_Kaggle_T4.ipynb
-│   └── KAGGLE-GUIDE.md
 ├── scripts/
 │   ├── prepare_preference_data.py  # CLI wrapper for NB2 logic
 │   ├── train_dpo.py                # CLI wrapper for NB3 logic
@@ -282,7 +272,7 @@ Full provocations: [`BONUS-CHALLENGE.md`](BONUS-CHALLENGE.md) (tiếng Việt) �
 - **Slide deck:** [`day22/day07-dpo-orpo-alignment-tu-sft-en-preference-learning.tex`](../day07-dpo-orpo-alignment-tu-sft-en-preference-learning.tex)
 - **Sibling Day 21 lab** (LoRA/QLoRA fine-tuning, the SFT predecessor): [VinUni-AI20k/Day21-Track3-Finetuning-LLMs-LoRA-QLoRA](https://github.com/VinUni-AI20k/Day21-Track3-Finetuning-LLMs-LoRA-QLoRA)
 - **Stack:** Unsloth (Daniel Han + Mike Han), TRL (Hugging Face), PEFT, bitsandbytes, llama.cpp
-- **Datasets:** UltraFeedback (Argilla), `5CD-AI/Vietnamese-alpaca-gpt4-gg-translated`
+- **Datasets:** UltraFeedback (Argilla), `5CD-AI/Vietnamese-alpaca-cleaned`
 
 ---
 
