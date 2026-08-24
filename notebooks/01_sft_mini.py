@@ -26,6 +26,31 @@ import os
 from pathlib import Path
 
 # Tier detection. Defaults to T4 if env not set.
+# --- T4 / Turing (sm_75) attention fix -------------------------------------
+# xformers khong co kernel memory_efficient_attention_backward cho GQA (dinh dang
+# BMGHK) tren sm_75: fa2B/fa3B doi >= sm_80, cutlassB khong ho tro BMGHK
+# -> NotImplementedError ngay backward dau tien cua DPO.
+# Unsloth chon backend qua co HAS_XFORMERS dat luc import, KHONG co env var nao
+# de ep -> chan xformers o tang import truoc khi unsloth duoc nap.
+import sys
+
+GPU_CAP = None
+try:
+    import torch as _torch
+    if _torch.cuda.is_available():
+        GPU_CAP = _torch.cuda.get_device_capability(0)
+except Exception:
+    pass
+
+NEEDS_SDPA = GPU_CAP is not None and GPU_CAP < (8, 0)
+if NEEDS_SDPA:
+    if "unsloth" not in sys.modules:
+        # gan None -> `import xformers` raise ImportError -> HAS_XFORMERS = False
+        sys.modules.setdefault("xformers", None)
+        sys.modules.setdefault("xformers.ops", None)
+    print(f"GPU sm_{GPU_CAP[0]}{GPU_CAP[1]} < sm_80 -> chan xformers, ep dung SDPA")
+# ---------------------------------------------------------------------------
+
 COMPUTE_TIER = os.environ.get("COMPUTE_TIER", "T4").upper()
 assert COMPUTE_TIER in ("T4", "BIGGPU"), f"Invalid COMPUTE_TIER: {COMPUTE_TIER}"
 
@@ -41,14 +66,9 @@ else:  # BIGGPU
     PER_DEVICE_BATCH = 2
     GRAD_ACCUM = 4
 
-SFT_DATASET = os.environ.get("SFT_DATASET", "bkai-foundation-models/vi-alpaca")
-SFT_SLICE = int(os.environ.get("SFT_SLICE", "1000"))
+SFT_DATASET = os.environ.get("SFT_DATASET", "5CD-AI/Vietnamese-alpaca-gpt4-gg-translated")
+SFT_SLICE = 1000
 NUM_EPOCHS = 1
-
-# NB2 builds native-VN preference pairs from rows [SFT_SLICE:] of the SAME dataset.
-# Keeping the two slices disjoint matters: if DPO's `chosen` answers had already been
-# memorised during SFT, the implicit reward on them is inflated and the reward gap
-# measures memorisation, not preference. Raise NB2's VN_POOL_START if you raise this.
 
 REPO_ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
 ADAPTER_OUT = REPO_ROOT / "adapters" / "sft-mini"
@@ -78,6 +98,18 @@ print(f"GPU: {gpu.name}  ({gpu.total_memory / 1e9:.1f} GB)")
 # %%
 from unsloth import FastLanguageModel
 
+# Ha co xformers phong khi unsloth da duoc import truoc do (vd. cell setup cua
+# Kaggle/Colab da cham vao unsloth) -> luc do chan sys.modules khong con tac dung.
+if NEEDS_SDPA:
+    try:
+        from unsloth.utils import attention_dispatch as _ad
+        for _flag in ("HAS_XFORMERS", "HAS_FLASH_ATTENTION"):
+            if getattr(_ad, _flag, False):
+                setattr(_ad, _flag, False)
+                print(f"Set attention_dispatch.{_flag} = False")
+    except Exception as _exc:
+        print("Khong patch duoc attention_dispatch:", _exc)
+
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=BASE_MODEL,
     max_seq_length=MAX_LEN,
@@ -89,6 +121,29 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
     print("Set tokenizer.pad_token = eos_token")
+
+# Qwen2.5 *base* (khong phai -Instruct) khong kem chat_template -> apply_chat_template()
+# raise ValueError. Set ChatML (dinh dang native cua Qwen2.5) mot cach tuong minh.
+if getattr(tokenizer, "chat_template", None) is None:
+    tokenizer.chat_template = (
+        r"{% for message in messages %}"
+        r"{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        r"{% endfor %}"
+        r"{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+    )
+    print("Set tokenizer.chat_template = ChatML (base model khong co san)")
+
+# ChatML ket thuc luot bang <|im_end|>. Neu khong tro eos vao do, generate() se
+# chay het max_new_tokens thay vi dung dung cho.
+_im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+if _im_end is not None and _im_end != tokenizer.unk_token_id:
+    tokenizer.eos_token = "<|im_end|>"
+    tokenizer.pad_token = tokenizer.eos_token
+    try:
+        model.generation_config.eos_token_id = _im_end
+        model.generation_config.pad_token_id = _im_end
+    except AttributeError:
+        pass
 
 # %%
 model = FastLanguageModel.get_peft_model(
@@ -111,51 +166,58 @@ print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requir
 # %% [markdown]
 # ## 2. Load + format VN Alpaca slice
 #
-# `bkai-foundation-models/vi-alpaca` — 50,006 rows, cột `instruction / input / output`,
-# tiếng Việt native (BKAI Foundation Models). Ban tổ chức đã cho phép dùng dataset này.
-#
-# Khác `5CD-AI/Vietnamese-alpaca-cleaned` (bản dịch máy của Alpaca tiếng Anh):
-# vi-alpaca sinh trực tiếp bằng tiếng Việt nên idiom + cấu trúc câu tự nhiên hơn,
-# ít lỗi "dịch word-by-word". Schema giống hệt Alpaca nên `format_alpaca_to_chat`
-# bên dưới không phải đổi gì.
-#
-# Điểm quan trọng cho lab này: **NB2 tái sử dụng chính dataset này làm nguồn `chosen`**
-# cho preference pairs tiếng Việt. Một dataset, hai vai trò — SFT ở NB1 (rows `[:1000]`),
-# preference ở NB2 (rows `[1000:]`, disjoint).
+# `5CD-AI/Vietnamese-alpaca-gpt4-gg-translated` is a 52k-row VN Alpaca-GPT4 set (Google-translated, cot `instruction_vi` / `input_vi` / `output_vi`). Lab 21
+# uses 1k slice for the demo run; we match that exactly so reward gap is comparable.
 
 # %%
 from datasets import load_dataset
 
 ds = load_dataset(SFT_DATASET, split=f"train[:{SFT_SLICE}]")
 print(f"Loaded {len(ds)} rows. Columns: {ds.column_names}")
-
-# vi-alpaca có một số ít row với instruction hoặc output rỗng. Nếu để nguyên, chúng
-# tạo ra chat turn thiếu user message (hoặc thiếu assistant message) và loss trên
-# các token đó vô nghĩa.
-_before = len(ds)
-ds = ds.filter(
-    lambda r: bool((r.get("instruction") or "").strip())
-    and bool((r.get("output") or "").strip())
-)
-print(f"Filtered empty instruction/output: {_before} -> {len(ds)} rows")
 print(f"\nFirst row:\n{ds[0]}")
 
 # %%
 # Alpaca → ChatML format (Qwen2.5's native template)
+# Column-name resolution. Cac mirror VN Alpaca dung schema khac nhau:
+#   5CD-AI/Vietnamese-alpaca-gpt4-gg-translated -> instruction_vi / input_vi / output_vi (+ *_en)
+#   5CD-AI/Vietnamese-alpaca-cleaned            -> instruction / input / output
+# Uu tien cot _vi de train tren tieng Viet; fallback ve schema Alpaca chuan.
+def _pick(row, *names):
+    for n in names:
+        value = row.get(n)
+        if value:
+            return value
+    return ""
+
+
 def format_alpaca_to_chat(row):
+    instruction = _pick(row, "instruction_vi", "instruction")
+    extra_input = _pick(row, "input_vi", "input")
+    output = _pick(row, "output_vi", "output")
+
     messages = []
-    if row.get("instruction"):
-        prompt = row["instruction"]
-        if row.get("input"):
-            prompt += "\n\n" + row["input"]
+    if instruction:
+        prompt = instruction
+        if extra_input:
+            prompt += "\n\n" + extra_input
         messages.append({"role": "user", "content": prompt})
-    if row.get("output"):
-        messages.append({"role": "assistant", "content": row["output"]})
+    if output:
+        messages.append({"role": "assistant", "content": output})
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
     return {"text": text}
 
 
 ds_formatted = ds.map(format_alpaca_to_chat, remove_columns=ds.column_names)
+
+# Guard: neu ten cot khong khop, apply_chat_template van tra ve chuoi template rong
+# -> train ra rac ma khong bao loi. Bat o day thay vi 10 phut sau.
+n_empty = sum(1 for t in ds_formatted["text"] if len(t.strip()) < 32)
+assert n_empty < 0.1 * len(ds_formatted), (
+    f"{n_empty}/{len(ds_formatted)} rows formatted rong. "
+    f"Column names cua dataset: {ds.column_names}. "
+    f"Sua _pick(...) trong format_alpaca_to_chat cho khop schema."
+)
+print(f"Empty/degenerate rows: {n_empty}/{len(ds_formatted)}")
 print(f"\nSample formatted text (first 500 chars):\n{ds_formatted[0]['text'][:500]}")
 
 # %% [markdown]

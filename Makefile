@@ -46,7 +46,7 @@ sft: ## NB1 — build SFT-mini checkpoint (~10 min T4 / ~5 min A100)
 	@$(JUPYTEXT) --to notebook --update notebooks/01_sft_mini.py
 	@$(JUPYTER) nbconvert --to notebook --execute --inplace notebooks/01_sft_mini.ipynb
 
-data: ## NB2 — preference data prep (~12-17 min: EN slice + native-VN rejection sampling)
+data: ## NB2 — preference data prep (~2 min)
 	@$(JUPYTEXT) --to notebook --update notebooks/02_preference_data.py
 	@$(JUPYTER) nbconvert --to notebook --execute --inplace notebooks/02_preference_data.ipynb
 
@@ -66,7 +66,7 @@ bench: ## NB6 (OPTIONAL/bonus) — IFEval/GSM8K/MMLU + 4-bar plot (~30 min T4)
 	@$(JUPYTEXT) --to notebook --update notebooks/06_benchmark.py
 	@$(JUPYTER) nbconvert --to notebook --execute --inplace notebooks/06_benchmark.ipynb
 
-pipeline: sft data dpo eval ## Run the 4 CORE notebooks (NB1-NB4, ~40 min T4)
+pipeline: sft data dpo eval ## Run the 4 CORE notebooks (NB1-NB4, ~30 min T4)
 
 pipeline-full: sft data dpo eval deploy bench ## Core + OPTIONAL NB5 (GGUF) + NB6 (benchmark)
 
